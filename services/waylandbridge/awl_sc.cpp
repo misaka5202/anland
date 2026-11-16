@@ -364,6 +364,11 @@ static const char* mode_name(sc_mode m) {
     default:              return "none";
     }
 }
+/* [MTK] 直连 dma-buf 纹理缓存：伪造 AHB 被拒时用它，按 (surface_id, ino) 命中。
+ * 只在这个翻译单元的合成线程上访问。 */
+#include <unordered_map>
+static std::unordered_map<uint64_t, awl_gl_tex> g_sc_dmtex;
+static std::unordered_map<uint64_t, uint64_t>   g_sc_dmtex_ino;
 
 struct sc_rlayer {
     uint64_t surface_id;
@@ -923,6 +928,23 @@ static bool sc_render_window(const std::shared_ptr<sc_window>& w, int64_t vsync_
                 struct awl_ahb_slot* slot =
                     L->ahb ? awl_ahb_cache_get(L->ahb, head, AWL_SC_USAGE, w->frame_clock) : nullptr;
                 GLuint tex = slot ? awl_gl_slot_texture(slot) : 0;
+                if (!tex) {
+                    /* [MTK] AHB 伪造被拒（非高通平台）→ 直接把客户端 dma-buf
+                     * 用 EGL_EXT_image_dma_buf_import 变成纹理，不经过伪造。 */
+                    awl_gl_tex& dt = g_sc_dmtex[lay[i].surface_id];
+                    bool need = (dt.texture == 0) || (g_sc_dmtex_ino[lay[i].surface_id] != head->ino);
+                    if (dt.texture && need)
+                        awl_gl_tex_release(&dt);
+                    if (need && awl_gl_tex_import_dmabuf(head->dmabuf_fd, head->width, head->height,
+                                                         head->stride, head->format, 0ULL, &dt)) {
+                        g_sc_dmtex_ino[lay[i].surface_id] = head->ino;
+                        static bool logged_sc = false;
+                        if (!logged_sc) { logged_sc = true;
+                            LOGI("SC: dmabuf 直连导入生效（绕过 AHB 伪造，fmt=0x%08x %ux%u）",
+                                 head->format, head->width, head->height); }
+                    }
+                    if (dt.texture) tex = dt.texture;
+                }
                 int rel = -1;
                 if (tex && latch_egl(w.get(), L, txn, ctx, tex, head->width, head->height,
                                      head->format, SC_MODE_EGL,

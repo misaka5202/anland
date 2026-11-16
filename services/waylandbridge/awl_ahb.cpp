@@ -85,6 +85,18 @@ uint32_t awl_ahb_platform_stride_px(uint32_t width_px) {
 }
 
 bool awl_ahb_hwc_scanout_ok(const struct awl_bq_buffer* b) {
+    /* [MTK] SCANOUT 要求把客户端的 dma-buf 伪造进一个 AHardwareBuffer，而那套伪造
+     * 依赖高通 snapalloc 的 2-fd handle 布局。MTK 的 handle 是 3 个 fd，伪造必然
+     * 被 awl_ahb_wrap 拒绝（"not a snapalloc layout"），零拷贝路径永远走不通。
+     *
+     * 下面的 stride oracle 在 MTK 上返回 0（"没有判定"），按原逻辑会保留 HWC 路径，
+     * 于是每一帧都白试一次伪造。这里让非高通的平台直接放弃 SCANOUT，
+     * 全部走 EGL 模式：GL 把客户端 dma-buf 采样成纹理、渲染进平台原生分配的 AHB，
+     * SF 再去 scan out 那个原生缓冲 —— 这条路不碰伪造。
+     *
+     * 用环境变量控制而不是编译期判断，是因为同一份二进制要覆盖所有平台，
+     * 而 SCANOUT 在支持它的平台上确实更好（零拷贝）。 */
+    if (getenv("AWL_NO_SCANOUT")) return false;
     if (!b || b->stride % 4 != 0) return false;
     uint32_t spx = b->stride / 4;
     uint32_t want = awl_ahb_platform_stride_px(spx);

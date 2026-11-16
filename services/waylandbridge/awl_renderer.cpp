@@ -148,6 +148,12 @@ static void window_teardown_gl(wl_window* w) {
 /* ---------------- public API ---------------- */
 
 static void render_thread_loop(wl_window* w);   /* defined at end of file */
+
+/* 直连 dma-buf 纹理的缓存：surface_id → awl_gl_tex。
+ * 只在高通专属的 AHB 伪造失败时使用（MTK 等平台）。渲染线程独占访问。 */
+#include <unordered_map>
+static std::unordered_map<uint64_t, awl_gl_tex> g_dmtex;
+static std::unordered_map<uint64_t, uint64_t>   g_dmtex_ino;
 void awl_renderer_request_render(uint64_t id);  /* awl_renderer.hpp; used by render_frame's re-arm */
 
 /* Compatibility path for vendor gralloc layouts that cannot describe Mesa's
@@ -345,24 +351,59 @@ static void render_frame(wl_window* w) {
         uint32_t bw = 0, bh = 0, fmt = 0;
         if (b && b->dmabuf_fd >= 0) {
             /* dmabuf frame → forged AHB → EGLImage texture (cache hit from the second lap on) */
-            if (!l.cpu_dmabuf) {
+            if (l.cpu_dmabuf) {
+                /* A previous frame proved the vendor AHB forging is unusable for
+                 * this surface; the CPU path is already warm. */
+                tex = dmabuf_cpu_texture(&l, b);
+            } else {
                 if (!l.cache) l.cache = awl_ahb_cache_create(awl_gl_tex_payload_destroy);
                 struct awl_ahb_slot* s = l.cache
                     ? awl_ahb_cache_get(l.cache, b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, w->frame_no)
                     : nullptr;
                 if (s) tex = awl_gl_slot_texture(s);
-            }
-            if (tex) {
-                if (l.shm.texture) awl_gl_shm_release(&l.shm);
-            } else {
-                tex = dmabuf_cpu_texture(&l, b);
-                if (tex && !l.cpu_dmabuf) {
-                    l.cpu_dmabuf = true;
-                    LOGI("window %llu layer %llu: AHB unavailable — linear dmabuf CPU upload fallback",
-                         (unsigned long long)w->id,
-                         (unsigned long long)lay[i].surface_id);
+
+                if (!tex) {
+                    /* Forging is refused when the handle is not the 2-fd snapalloc
+                     * layout. MediaTek's mtk_alloc reports three fds. Import the
+                     * dma-buf directly: zero copy, and cached per surface+inode so
+                     * the EGLImage is not rebuilt every frame. */
+                    awl_gl_tex& dt = g_dmtex[lay[i].surface_id];
+                    bool need = (dt.texture == 0) || (g_dmtex_ino[lay[i].surface_id] != b->ino);
+                    if (dt.texture && need) awl_gl_tex_release(&dt);
+                    if (need && awl_gl_tex_import_dmabuf(b->dmabuf_fd, b->width, b->height,
+                                                         b->stride, b->format,
+                                                         0ULL /* DRM_FORMAT_MOD_LINEAR */, &dt)) {
+                        g_dmtex_ino[lay[i].surface_id] = b->ino;
+                        static bool dm_logged = false;
+                        if (!dm_logged) {
+                            dm_logged = true;
+                            LOGI("window %llu layer %llu: dmabuf imported directly via "
+                                 "EGL_EXT_image_dma_buf_import (fmt=0x%08x %ux%u)",
+                                 (unsigned long long)w->id,
+                                 (unsigned long long)lay[i].surface_id,
+                                 b->format, b->width, b->height);
+                        }
+                    }
+                    if (dt.texture) tex = dt.texture;
+                }
+
+                if (!tex) {
+                    /* Last resort: upload through the CPU. Only linear buffers pass
+                     * dmabuf_cpu_texture()'s checks. Once this succeeds the surface
+                     * stays on the CPU path. */
+                    tex = dmabuf_cpu_texture(&l, b);
+                    if (tex) {
+                        l.cpu_dmabuf = true;
+                        LOGI("window %llu layer %llu: AHB unavailable — linear dmabuf CPU upload fallback",
+                             (unsigned long long)w->id,
+                             (unsigned long long)lay[i].surface_id);
+                    }
                 }
             }
+            /* The surface left wl_shm; drop the stale upload texture. Only when
+             * a dmabuf texture was actually obtained — on total failure the layer
+             * is skipped below and keeping the old texture costs nothing. */
+            if (tex && l.shm.texture) awl_gl_shm_release(&l.shm);
             bw = b->width;
             bh = b->height;
             fmt = b->format;

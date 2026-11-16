@@ -289,6 +289,62 @@ bool awl_gl_tex_import(AHardwareBuffer* ahb, awl_gl_tex* out) {
     return true;
 }
 
+
+/* ---------------- dma-buf → texture（不经过 AHB） ---------------- */
+
+bool awl_gl_tex_import_dmabuf(int fd, uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t drm_format,
+                              uint64_t modifier, awl_gl_tex* out) {
+    if (fd < 0 || width == 0 || height == 0) return false;
+    if (!g.eglCreateImageKHR || !g.glEGLImageTargetTexture2DOES) {
+        LOGE("dmabuf import: EGL/KHR image entry points missing");
+        return false;
+    }
+
+    /* DRM fourcc 直接就是 EGL_LINUX_DRM_FOURCC_EXT 要的值 */
+    EGLint attrs[] = {
+        EGL_WIDTH,                          (EGLint)width,
+        EGL_HEIGHT,                         (EGLint)height,
+        EGL_LINUX_DRM_FOURCC_EXT,           (EGLint)drm_format,
+        EGL_DMA_BUF_PLANE0_FD_EXT,          (EGLint)fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT,      0,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT,       (EGLint)stride,
+        /* 修饰符只在非 INVALID 时给；LINEAR 也要给，否则部分驱动当成 tiled */
+        EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, (EGLint)(modifier & 0xffffffffu),
+        EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint)(modifier >> 32),
+        EGL_NONE
+    };
+
+    EGLImageKHR img = g.eglCreateImageKHR(g.display, EGL_NO_CONTEXT,
+                                          EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer)NULL,
+                                          attrs);
+    if (img == EGL_NO_IMAGE_KHR) {
+        LOGE("eglCreateImageKHR(dma_buf) failed 0x%x (fmt=0x%08x %ux%u stride=%u mod=0x%llx)",
+             eglGetError(), drm_format, width, height, stride,
+             (unsigned long long)modifier);
+        return false;
+    }
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g.glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
+    GLenum terr = glGetError();
+    if (terr != GL_NO_ERROR) {
+        LOGE("EGLImageTargetTexture(dma_buf): 0x%x", terr);
+        glDeleteTextures(1, &tex);
+        g.eglDestroyImageKHR(g.display, img);
+        return false;
+    }
+    out->image = img;
+    out->texture = tex;
+    return true;
+}
+
 void awl_gl_tex_release(awl_gl_tex* t) {
     if (t->texture) glDeleteTextures(1, &t->texture);
     if (t->image != EGL_NO_IMAGE_KHR) g.eglDestroyImageKHR(g.display, t->image);
