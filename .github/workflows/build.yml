@@ -10,7 +10,9 @@ name: build
 
 on:
   push:
-    branches: [main]
+    # main 之外也放行 feature 分支：fork 上 workflow_dispatch 要求文件在默认分支，
+    # 而默认分支是 legacy（另一个老 workflow），没法从这里手动触发。
+    branches: [main, 'feat/**']
   pull_request:
   workflow_dispatch:
 
