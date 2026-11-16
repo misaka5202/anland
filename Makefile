@@ -144,7 +144,14 @@ module: native pulse
 	rm -rf "$(OUT)/module"
 	mkdir -p "$$MOD"
 	cp module/module.prop module/sepolicy.rule module/service.sh \
-	   module/customize.sh module/plat_service_contexts.anland "$$MOD/"
+	   module/customize.sh "$$MOD/"
+	# plat_service_contexts.anland 是可选的：完整的 contexts 文件不随包发布，
+	# customize.sh 在刷机时从设备上系统的原件现场生成（避免旧 OTA 的残留遮蔽）。
+	# 模板片段在 908b44f 里被删掉了，所以这里必须容忍它不存在，
+	# 否则整个 module 目标会失败，连已经编好的 waylandbridge 都拿不到。
+	if [ -f module/plat_service_contexts.anland ]; then \
+	  cp module/plat_service_contexts.anland "$$MOD/"; \
+	fi
 	cp LICENSE "$$MOD/"
 	cp "$(OUT)/waylandbridge" "$$MOD/"
 	cp -r "$(PA_ROOT)" "$$MOD/pulse"   # PulseAudio tree (bin/lib/etc), see `make pulse`
