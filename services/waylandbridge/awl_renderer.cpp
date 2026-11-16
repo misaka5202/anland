@@ -144,6 +144,12 @@ static void window_teardown_gl(wl_window* w) {
 /* ---------------- public API ---------------- */
 
 static void render_thread_loop(wl_window* w);   /* defined at end of file */
+
+/* 直连 dma-buf 纹理的缓存：surface_id → awl_gl_tex。
+ * 只在高通专属的 AHB 伪造失败时使用（MTK 等平台）。渲染线程独占访问。 */
+#include <unordered_map>
+static std::unordered_map<uint64_t, awl_gl_tex> g_dmtex;
+static std::unordered_map<uint64_t, uint64_t>   g_dmtex_ino;
 void awl_renderer_request_render(uint64_t id);  /* awl_renderer.hpp; used by render_frame's re-arm */
 
 /* Detach and reclaim a window entry (map removal inside g_map_lock, join/free
@@ -297,6 +303,23 @@ static void render_frame(wl_window* w) {
                 ? awl_ahb_cache_get(l.cache, b, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, w->frame_no)
                 : nullptr;
             if (s) tex = awl_gl_slot_texture(s);   /* 0 = forge/import refused — retry next frame */
+                if (!tex) {
+                    /* AHB 伪造被拒（非高通平台）→ 直接用 EGL_EXT_image_dma_buf_import。
+                     * 同一 inode 命中缓存，避免每帧重建 EGLImage。 */
+                    awl_gl_tex& dt = g_dmtex[lay[i].surface_id];
+                    bool need = (dt.texture == 0) || (g_dmtex_ino[lay[i].surface_id] != b->ino);
+                    if (dt.texture && need) { awl_gl_tex_release(&dt); }
+                    if (need && awl_gl_tex_import_dmabuf(b->dmabuf_fd, b->width, b->height,
+                                                         b->stride, b->format,
+                                                         0ULL /* DRM_FORMAT_MOD_LINEAR */, &dt)) {
+                        g_dmtex_ino[lay[i].surface_id] = b->ino;
+                        static bool logged = false;
+                        if (!logged) { logged = true;
+                            LOGI("dmabuf 直连导入生效（绕过 AHB 伪造，fmt=0x%08x %ux%u）",
+                                 b->format, b->width, b->height); }
+                    }
+                    if (dt.texture) tex = dt.texture;
+                }
             bw = b->width;
             bh = b->height;
             fmt = b->format;

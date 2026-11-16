@@ -73,6 +73,13 @@ struct awl_gl_tex {
     GLuint texture = 0;
 };
 bool awl_gl_tex_import(AHardwareBuffer* ahb, awl_gl_tex* out);
+
+/* 直接从客户端 dma-buf 建 EGLImage + 纹理（EGL_EXT_image_dma_buf_import）。
+ * 不经过 AHardwareBuffer，因此不依赖高通的 snapalloc 伪造，MTK 等平台可用。
+ * fd 由调用方持有；本函数只在创建期间使用，不接管所有权。 */
+bool awl_gl_tex_import_dmabuf(int fd, uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t drm_format,
+                              uint64_t modifier, awl_gl_tex* out);
 void awl_gl_tex_release(awl_gl_tex* t);
 /* awl_ahb_cache glue: a slot's payload is a heap awl_gl_tex built on first
  * use. Pass awl_gl_tex_payload_destroy as the cache's payload_destroy (must
