@@ -18,7 +18,23 @@ if [ -r "$PLAT_CTX_SRC" ] && [ -f "$MODPATH/plat_service_contexts.anland" ]; the
   mkdir -p "${PLAT_CTX_DST%/*}"
   cp -f "$PLAT_CTX_SRC" "$PLAT_CTX_DST"
   if ! grep -q '^anland[.]host[[:space:]]' "$PLAT_CTX_DST"; then
-    cat "$MODPATH/plat_service_contexts.anland" >> "$PLAT_CTX_DST"
+    # servicemanager 用首个匹配的标签，通配符 '* ...default_android_service' 行
+    # 必须保持最后一行。直接 append 会把 anland.host 放到 '*' 之后变成死行，
+    # 于是 anland.host 被贴成 default_android_service，untrusted_app_29 的
+    # service_manager find 被 SELinux 拒 -> getService=null -> 应用永不建窗。
+    # 正确做法：把 anland 片段插到第一个通配符行之前。
+    _frag="$MODPATH/plat_service_contexts.anland"
+    _tmp="${PLAT_CTX_DST}.anl.$$"
+    if grep -qE '^[*][[:space:]]' "$PLAT_CTX_DST"; then
+      awk -v fragfile="$_frag" '
+        BEGIN { while ((getline l < fragfile) > 0) frag = frag l "\n" }
+        !injected && /^[*][[:space:]]/ { printf "%s", frag; injected = 1 }
+        { print }
+        END { if (!injected) printf "%s", frag }
+      ' "$PLAT_CTX_DST" > "$_tmp" && mv -f "$_tmp" "$PLAT_CTX_DST"
+    else
+      cat "$_frag" >> "$PLAT_CTX_DST"
+    fi
   fi
   set_perm "$PLAT_CTX_DST" 0 0 0644
   echo "anland: generated platform service-context overlay"
