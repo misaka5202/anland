@@ -44,6 +44,17 @@
             android:noHistory="true"
             android:taskAffinity="" />
 
+        <!-- 快捷方式的创建入口：由 anland-shell 显式 intent 调起，用宿主包名
+             调用 ShortcutManager.requestPinShortcut，让图标归宿主所有。
+             透明、无布局、请求后立刻 finish；不接触 root 或 daemon。 -->
+        <activity
+            android:name=".PinShortcutActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="" />
+
         <!-- Window behavior settings。anland.action.OPEN_SETTINGS 让额外按键栏的
              「设置」键能从 libawl 库模块里跨模块拉起（库不依赖 app 类）。 -->
         <activity android:name=".WlSettingsActivity" android:exported="true">
